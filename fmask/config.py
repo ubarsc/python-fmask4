@@ -103,6 +103,13 @@ class FmaskConfig(object):
     # Do we do the Sentinel-2 Cloud Displacement Test ?
     sen2displacementTest = False
     sen2cdiWindow = 7
+    
+    # Default auxilliary data for Fmask4 improvements. 
+    fmaskHomeDir = os.path.dirname(os.path.dirname(__file__))
+    auxDataDir = os.path.join(fmaskHomeDir, "auxdata")
+    # These are VRTs, constructed on top of the auxilliary datasets distributed by Qiu et al. 
+    gswoFile = os.path.join(auxDataDir, "gswo150.vrt")
+    demFile = os.path.join(auxDataDir, "gtopo30.vrt")
 
     def __init__(self, sensor):
         """

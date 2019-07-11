@@ -224,6 +224,8 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal):
         infiles.saturationMask = fmaskFilenames.saturationMask
     elif fmaskConfig.verbose:
         print('Saturation mask not supplied - saturated areas may not be detected')
+    infiles.gswo = fmaskConfig.gswoFile
+    infiles.dem = fmaskConfig.demFile
     
     (fd, outfiles.pass1) = tempfile.mkstemp(prefix='pass1', dir=fmaskConfig.tempDir, 
                                 suffix=fmaskConfig.defaultExtension)
