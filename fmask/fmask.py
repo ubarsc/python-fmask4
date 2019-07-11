@@ -354,9 +354,9 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     b45test = ((ref[nir] / ref[swir1]) > 0.75)
     
     # Equation 5
-    waterTest = numpy.logical_or(
-        numpy.logical_and(ndvi < 0.01, ref[nir] < 0.11),
-        numpy.logical_and(ndvi < 0.1, ref[nir] < 0.05)
+    waterTest = (
+        ((ndvi < 0.01) & (ref[nir] < 0.11)) |
+        ((ndvi < 0.1) & (ref[nir] < 0.05))
     )
 
     waterTest[nullmask] = False
