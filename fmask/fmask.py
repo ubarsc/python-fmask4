@@ -237,6 +237,8 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal):
     controls.setWindowXsize(RIOS_WINDOW_SIZE)
     controls.setWindowYsize(RIOS_WINDOW_SIZE)
     controls.setReferenceImage(infiles.toaref)
+    controls.setResampleMethod('average', imagename='gswo')
+    controls.setResampleMethod('average', imagename='dem')
     controls.setCalcStats(False)
 
     otherargs.refBands = fmaskConfig.bands  
