@@ -142,8 +142,13 @@ def doFmask(fmaskFilenames, fmaskConfig):
         fmaskConfig.gswoFile, 'tmpgswo_', fmaskConfig)
     tmpDEMfile = tempSubsetGlobalAux(fmaskFilenames.toaRef, 
         fmaskConfig.demFile, 'tmpdem_', fmaskConfig)
+
     if fmaskConfig.verbose: print("Cloud layer, water occurrence thresholding")
     woThresh = doWaterOccurrencePass(fmaskFilenames, fmaskConfig, tmpGSWOfile)
+
+    if fmaskConfig.verbose: print("Cloud layer, cirrus normalization lookup")
+#    cirrusNormTbl = doCirrusNormLookup(fmaskFilenames, fmaskConfig, tmpDEMfile)
+#    print(cirrusNormTbl)
 
     if fmaskConfig.verbose: print("Cloud layer, pass 1")
     (pass1file, Twater, Tlow, Thigh, NIR_17) = doPotentialCloudFirstPass(
@@ -187,14 +192,14 @@ def doFmask(fmaskFilenames, fmaskConfig):
     retVal = None
     if not fmaskConfig.keepIntermediates:
         for filename in [pass1file, pass2file, interimCloudmask, potentialShadowsFile,
-                interimShadowmask, tmpGSWOfile]:
+                interimShadowmask, tmpGSWOfile, tmpDEMfile]:
             os.remove(filename)
     else:
         # create a dictionary with the intermediate filenames so we can return them.
         retVal = {'pass1' : pass1file, 'pass2' : pass2file, 
-            'interimCloud' : interimCloudmask, 
-            'potentialShadows' : potentialShadowsFile, 
-            'interimShadow' : interimShadowmask, 'gswofile' : tmpGSWOfile}
+            'interimCloud' : interimCloudmask, 'potentialShadows' : potentialShadowsFile, 
+            'interimShadow' : interimShadowmask, 'gswofile' : tmpGSWOfile,
+            'demfile':tmpDEMfile}
 
     if fmaskConfig.verbose: print('finished fmask')
     
@@ -310,6 +315,70 @@ def doWOpass(info, inputs, outputs, otherargs):
     
     gswo = inputs.gswo[0]
     otherargs.gswo_hist = accumHist(otherargs.gswo_hist, gswo[spectralWater])
+
+
+def doCirrusNormLookup(fmaskFilenames, fmaskConfig, tmpDEMfile):
+    """
+    Pass over the cirrus band, with the DEM, finding the minimum
+    cirrus reflectance at each level, to use for normalization. 
+    Return a lookup table, indexed by (elevation//100), giving
+    min cirrus ref for each 100m level. 
+    """
+    cirrusLookup = None
+    if fmaskConfig.CIRRUS in fmaskConfig.bands:
+        infiles = applier.FilenameAssociations()
+        outfiles = applier.FilenameAssociations()
+        otherargs = applier.OtherInputs()
+        controls = applier.ApplierControls()
+
+        infiles.cirrus = fmaskFilenames.toaRef
+        infiles.dem = tmpDEMfile
+        otherargs.cirrusLookup = {}
+        otherargs.demStep = 100
+        otherargs.fmaskConfig = fmaskConfig
+        controls.setReferenceImage(tmpDEMfile)
+        controls.setResampleMethod('near')
+
+        applier.apply(calcCirrusLookup, infiles, outfiles, otherargs, controls=controls)
+
+        # Turn the dictionary into an array
+        MT_EVEREST = 8900       # A bit higher than Mt Everest
+        MAXLVL = MT_EVEREST // otherargs.demStep
+        cirrusLookup = numpy.zeros(MAXLVL, dtype=numpy.float32)
+        for lvl in range(MAXLVL):
+            if lvl in otherargs.cirrusLookup:
+                cirrusLookup[lvl] = otherargs.cirrusLookup[lvl]
+            elif lvl > 0:
+                cirrusLookup[lvl] = cirrusLookup[lvl-1]
+            else:
+                cirrusLookup[lvl] = 0
+
+    return cirrusLookup
+
+
+def calcCirrusLookup(info, inputs, outputs, otherargs):
+    """
+    For each 100m elevation level, find the minimum value of cirrus band
+    reflectance at that level. 
+    
+    This is not yet right - we need to restrict to non-PCP pixels. 
+    """
+    cirrus = otherargs.refBands[config.BAND_CIRRUS]
+    ref = inputs.toaref.astype(numpy.float) / otherargs.fmaskConfig.TOARefScaling
+    
+    dem = inputs.dem[0]
+    demLvl = dem // otherargs.demStep
+    demLvlList = numpy.unique(demLvl)
+
+    for lvl in demLvlList:
+        atLevel = (demLvl == lvl)
+        refAtLevel = ref[cirrus][atLevel]
+        minRefAtLevel = refAtLevel.min()
+        if lvl in otherargs.cirrusLookup:
+            if minRefAtLevel < otherargs.cirrusLookup[lvl]:
+                otherargs.cirrusLookup[lvl] = minRefAtLevel
+        else:
+            otherargs.cirrusLookup[lvl] = minRefAtLevel
 
 
 def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal, 
@@ -530,6 +599,10 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     maxNdx = numpy.absolute(modNdvi)
     maxNdx = numpy.maximum(maxNdx, numpy.absolute(modNdsi))
     maxNdx = numpy.maximum(maxNdx, whiteness)
+    # Qiu 2019 add in NDBI as well
+    ndbi = ((ref[swir1] - ref[nir]) / (ref[swir1] + ref[nir]))
+    maxNdx = numpy.maximum(maxNdx, numpy.absolute(ndbi))
+    
     variabilityProb = 1 - maxNdx
     variabilityProb[nullmask] = 0
     variabilityProbPcnt = numpy.round(variabilityProb * PROB_SCALE)
