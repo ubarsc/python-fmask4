@@ -138,9 +138,16 @@ def doFmask(fmaskFilenames, fmaskConfig):
         fmaskConfig.setCloudBufferSize(0)
         fmaskConfig.setShadowBufferSize(3)
     
+    tmpGSWOfile = tempSubsetGlobalAux(fmaskFilenames.toaRef, 
+        fmaskConfig.gswoFile, 'tmpgswo_', fmaskConfig)
+    tmpDEMfile = tempSubsetGlobalAux(fmaskFilenames.toaRef, 
+        fmaskConfig.demFile, 'tmpdem_', fmaskConfig)
+    if fmaskConfig.verbose: print("Cloud layer, water occurrence thresholding")
+    woThresh = doWaterOccurrencePass(fmaskFilenames, fmaskConfig, tmpGSWOfile)
+
     if fmaskConfig.verbose: print("Cloud layer, pass 1")
     (pass1file, Twater, Tlow, Thigh, NIR_17) = doPotentialCloudFirstPass(
-        fmaskFilenames, fmaskConfig, missingThermal)
+        fmaskFilenames, fmaskConfig, missingThermal, woThresh, tmpGSWOfile, tmpDEMfile)
     if fmaskConfig.verbose: print("  Twater=", Twater, "Tlow=", Tlow, "Thigh=", Thigh, "NIR_17=", 
         NIR_17)
     
@@ -180,14 +187,14 @@ def doFmask(fmaskFilenames, fmaskConfig):
     retVal = None
     if not fmaskConfig.keepIntermediates:
         for filename in [pass1file, pass2file, interimCloudmask, potentialShadowsFile,
-                interimShadowmask]:
+                interimShadowmask, tmpGSWOfile]:
             os.remove(filename)
     else:
         # create a dictionary with the intermediate filenames so we can return them.
         retVal = {'pass1' : pass1file, 'pass2' : pass2file, 
             'interimCloud' : interimCloudmask, 
             'potentialShadows' : potentialShadowsFile, 
-            'interimShadow' : interimShadowmask}
+            'interimShadow' : interimShadowmask, 'gswofile' : tmpGSWOfile}
 
     if fmaskConfig.verbose: print('finished fmask')
     
@@ -205,7 +212,108 @@ B4_SCALE = 500.0
 #: Global RIOS window size
 RIOS_WINDOW_SIZE = 512
 
-def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal):
+
+def tempSubsetGlobalAux(toaRefFile, globalAuxFile, tmpPrefix, fmaskConfig):
+    """
+    Make temporary subsets of the global auxilliary datasets. Need to do this 
+    because RIOS does not cope with checking the intersection against
+    a global file in another prjection. We end up wrapping arund the other side
+    of the planet, and getting it wrong. So, just use gdal_translate to extract
+    a relevant subset into a temp file. This is very quick, as they are 
+    very low res. 
+    """
+    (fd, tmpfile) = tempfile.mkstemp(prefix=tmpPrefix, dir=fmaskConfig.tempDir, 
+                                suffix=fmaskConfig.defaultExtension)
+    os.close(fd)
+    imginfo = fileinfo.ImageInfo(toaRefFile)
+    globalinfo = fileinfo.ImageInfo(globalAuxFile)
+    (ulx, uly, urx, ury, llx, lly, lrx, lry) = imginfo.getCorners(outWKT=globalinfo.projection)
+    left = min(ulx, urx, llx, lrx)
+    right = max(ulx, urx, llx, lrx)
+    top = max(uly, ury, lly, lry)
+    bottom = min(uly, ury, lly, lry)
+    
+    # Need to get Sam to help with Windoze-compatible details of finding gdal_translate
+    cmdList = ["gdal_translate", "-q", "-of", "GTiff", "-co", "COMPRESS=DEFLATE", 
+        "-co", "TILED=YES", "-co", "BIGTIFF=IF_SAFER", 
+        "-projwin", str(left), str(top), str(right), str(bottom), 
+        globalAuxFile, tmpfile]
+    proc = subprocess.Popen(cmdList)
+    proc.communicate()
+    return tmpfile
+
+
+def doWaterOccurrencePass(fmaskFilenames, fmaskConfig, tmpGSWOfile):
+    """
+    This is part of the Qiu 2019 improvements. Run an initial pass to 
+    derive a water occurrence threshold, to use later in separation of land 
+    and water. 
+    """
+    # Set up for RIOS
+    infiles = applier.FilenameAssociations()
+    outfiles = applier.FilenameAssociations()
+    otherargs = applier.OtherInputs()
+    controls = applier.ApplierControls()
+
+    infiles.toaref = fmaskFilenames.toaRef
+    infiles.gswo = tmpGSWOfile
+    otherargs.refBands = fmaskConfig.bands  
+    otherargs.gswo_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
+    refImgInfo = fileinfo.ImageInfo(fmaskFilenames.toaRef)
+    otherargs.refNull = refImgInfo.nodataval[0]
+    if otherargs.refNull is None:
+        # The null value used by USGS is 0, but is not recorded in the TIF files
+        otherargs.refNull = 0
+    otherargs.TOARefScaling = fmaskConfig.TOARefScaling
+    controls.setWindowXsize(RIOS_WINDOW_SIZE)
+    controls.setWindowYsize(RIOS_WINDOW_SIZE)
+    controls.setReferenceImage(infiles.toaref)
+    
+    applier.apply(doWOpass, infiles, outfiles, otherargs, controls=controls)
+    
+    if sum(otherargs.gswo_hist) > 100:    # At least 100 pixels to have a usable histogram
+        # Qiu 2019, section 3.1.1. 
+        woThresh = scoreatpcnt(otherargs.gswo_hist, 17.5) - 5
+    else:
+        # If we have no spectral water pixels, just use the GSWO layer directly 
+        # to indicate probably water.
+        woThresh = 50
+    
+    return woThresh
+
+
+def doWOpass(info, inputs, outputs, otherargs):
+    """
+    Water occurrence pass (Qiu, 2019). Find spectrally derived water, and create a 
+    histogram of the water occurrence layer for only those water pixels. 
+    
+    A minor inefficiency here, as I am calculating the spectralWater equation
+    again in pass1, but faster to do this than write it out and read it in (I think). 
+    """
+    bandsForNull = numpy.array([config.BAND_RED, config.BAND_NIR])
+    refNullmask = (inputs.toaref[bandsForNull] == otherargs.refNull).any(axis=0)
+    red = otherargs.refBands[config.BAND_RED]
+    nir = otherargs.refBands[config.BAND_NIR]
+
+    ref = inputs.toaref.astype(numpy.float) / otherargs.TOARefScaling
+    # Clamp off any reflectance <= 0
+    ref[ref<=0] = 0.00001
+
+    ndvi = (ref[nir] - ref[red]) / (ref[nir] + ref[red])
+
+    # Zhu, 2012, equation 5
+    spectralWater = (
+        ((ndvi < 0.01) & (ref[nir] < 0.11)) |
+        ((ndvi < 0.1) & (ref[nir] < 0.05))
+    )
+    spectralWater[refNullmask] = False
+    
+    gswo = inputs.gswo[0]
+    otherargs.gswo_hist = accumHist(otherargs.gswo_hist, gswo[spectralWater])
+
+
+def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal, 
+        woThresh, tmpGSWOfile, tmpDEMfile):
     """
     Run the first pass of the potential cloud layer. Also
     finds the temperature thresholds which will be needed 
@@ -224,8 +332,8 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal):
         infiles.saturationMask = fmaskFilenames.saturationMask
     elif fmaskConfig.verbose:
         print('Saturation mask not supplied - saturated areas may not be detected')
-    infiles.gswo = fmaskConfig.gswoFile
-    infiles.dem = fmaskConfig.demFile
+    infiles.gswo = tmpGSWOfile
+    infiles.dem = tmpDEMfile
     
     (fd, outfiles.pass1) = tempfile.mkstemp(prefix='pass1', dir=fmaskConfig.tempDir, 
                                 suffix=fmaskConfig.defaultExtension)
@@ -237,8 +345,8 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal):
     controls.setWindowXsize(RIOS_WINDOW_SIZE)
     controls.setWindowYsize(RIOS_WINDOW_SIZE)
     controls.setReferenceImage(infiles.toaref)
-    controls.setResampleMethod('average', imagename='gswo')
-    controls.setResampleMethod('average', imagename='dem')
+    controls.setResampleMethod('near', imagename='gswo')
+    controls.setResampleMethod('near', imagename='dem')
     controls.setCalcStats(False)
 
     otherargs.refBands = fmaskConfig.bands  
@@ -246,6 +354,7 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal):
     otherargs.waterBT_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
     otherargs.clearLandBT_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
     otherargs.clearLandB4_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
+    otherargs.woThresh = woThresh
     otherargs.fmaskConfig = fmaskConfig
     refImgInfo = fileinfo.ImageInfo(fmaskFilenames.toaRef)
     otherargs.refNull = refImgInfo.nodataval[0]
@@ -358,6 +467,10 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         ((ndvi < 0.01) & (ref[nir] < 0.11)) |
         ((ndvi < 0.1) & (ref[nir] < 0.05))
     )
+    # Qiu 2019, equation 1
+    waterTest = waterTest | (inputs.gswo[0] > otherargs.woThresh)
+    # Qiu 2019 also says that snow/ice should be masked, but their MATLAB code 
+    # has this commented out, so I don't do it either. 
 
     waterTest[nullmask] = False
     
