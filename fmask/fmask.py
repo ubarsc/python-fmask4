@@ -143,28 +143,12 @@ def doFmask(fmaskFilenames, fmaskConfig):
     tmpDEMfile = tempSubsetGlobalAux(fmaskFilenames.toaRef, 
         fmaskConfig.demFile, 'tmpdem_', fmaskConfig)
 
-    if fmaskConfig.verbose: print("Cloud layer, water occurrence thresholding")
-    woThresh = doWaterOccurrencePass(fmaskFilenames, fmaskConfig, tmpGSWOfile)
-
-    if fmaskConfig.verbose: print("Cloud layer, cirrus normalization lookup")
-#    cirrusNormTbl = doCirrusNormLookup(fmaskFilenames, fmaskConfig, tmpDEMfile)
-#    print(cirrusNormTbl)
-
     if fmaskConfig.verbose: print("Cloud layer, pass 1")
-    (pass1file, Twater, Tlow, Thigh, NIR_17) = doPotentialCloudFirstPass(
-        fmaskFilenames, fmaskConfig, missingThermal, woThresh, tmpGSWOfile, tmpDEMfile)
-    if fmaskConfig.verbose: print("  Twater=", Twater, "Tlow=", Tlow, "Thigh=", Thigh, "NIR_17=", 
-        NIR_17)
-    
-    if fmaskConfig.verbose: print("Cloud layer, pass 2")
-    (pass2file, landThreshold) = doPotentialCloudSecondPass(fmaskFilenames, 
-        fmaskConfig, pass1file, Twater, Tlow, Thigh, missingThermal)
-    if fmaskConfig.verbose: print("  landThreshold=", landThreshold)
+    (pass1file, NIR_17, Tlow, Thigh) = doPotentialCloudFirstPass(
+        fmaskFilenames, fmaskConfig, missingThermal, tmpGSWOfile, tmpDEMfile)
+    # Now only one pass to this point
+    interimCloudmask = pass1file
 
-    if fmaskConfig.verbose: print("Cloud layer, pass 3")
-    interimCloudmask = doCloudLayerFinalPass(fmaskFilenames, fmaskConfig, 
-        pass1file, pass2file, landThreshold, Tlow, missingThermal)
-        
     if fmaskConfig.verbose: print("Potential shadows")
     potentialShadowsFile = doPotentialShadows(fmaskFilenames, fmaskConfig, NIR_17)
     
@@ -191,12 +175,13 @@ def doFmask(fmaskFilenames, fmaskConfig):
     # Remove temporary files
     retVal = None
     if not fmaskConfig.keepIntermediates:
-        for filename in [pass1file, pass2file, interimCloudmask, potentialShadowsFile,
+        for filename in [pass1file, interimCloudmask, potentialShadowsFile,
                 interimShadowmask, tmpGSWOfile, tmpDEMfile]:
-            os.remove(filename)
+            if os.path.exists(filename):
+                os.remove(filename)
     else:
         # create a dictionary with the intermediate filenames so we can return them.
-        retVal = {'pass1' : pass1file, 'pass2' : pass2file, 
+        retVal = {'pass1' : pass1file,  
             'interimCloud' : interimCloudmask, 'potentialShadows' : potentialShadowsFile, 
             'interimShadow' : interimShadowmask, 'gswofile' : tmpGSWOfile,
             'demfile':tmpDEMfile}
@@ -222,7 +207,7 @@ def tempSubsetGlobalAux(toaRefFile, globalAuxFile, tmpPrefix, fmaskConfig):
     """
     Make temporary subsets of the global auxilliary datasets. Need to do this 
     because RIOS does not cope with checking the intersection against
-    a global file in another prjection. We end up wrapping arund the other side
+    a global file in another projection. We end up wrapping around the other side
     of the planet, and getting it wrong. So, just use gdal_translate to extract
     a relevant subset into a temp file. This is very quick, as they are 
     very low res. 
@@ -248,141 +233,8 @@ def tempSubsetGlobalAux(toaRefFile, globalAuxFile, tmpPrefix, fmaskConfig):
     return tmpfile
 
 
-def doWaterOccurrencePass(fmaskFilenames, fmaskConfig, tmpGSWOfile):
-    """
-    This is part of the Qiu 2019 improvements. Run an initial pass to 
-    derive a water occurrence threshold, to use later in separation of land 
-    and water. 
-    """
-    # Set up for RIOS
-    infiles = applier.FilenameAssociations()
-    outfiles = applier.FilenameAssociations()
-    otherargs = applier.OtherInputs()
-    controls = applier.ApplierControls()
-
-    infiles.toaref = fmaskFilenames.toaRef
-    infiles.gswo = tmpGSWOfile
-    otherargs.refBands = fmaskConfig.bands  
-    otherargs.gswo_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
-    refImgInfo = fileinfo.ImageInfo(fmaskFilenames.toaRef)
-    otherargs.refNull = refImgInfo.nodataval[0]
-    if otherargs.refNull is None:
-        # The null value used by USGS is 0, but is not recorded in the TIF files
-        otherargs.refNull = 0
-    otherargs.TOARefScaling = fmaskConfig.TOARefScaling
-    controls.setWindowXsize(RIOS_WINDOW_SIZE)
-    controls.setWindowYsize(RIOS_WINDOW_SIZE)
-    controls.setReferenceImage(infiles.toaref)
-    
-    applier.apply(doWOpass, infiles, outfiles, otherargs, controls=controls)
-    
-    if sum(otherargs.gswo_hist) > 100:    # At least 100 pixels to have a usable histogram
-        # Qiu 2019, section 3.1.1. 
-        woThresh = scoreatpcnt(otherargs.gswo_hist, 17.5) - 5
-    else:
-        # If we have no spectral water pixels, just use the GSWO layer directly 
-        # to indicate probably water.
-        woThresh = 50
-    
-    return woThresh
-
-
-def doWOpass(info, inputs, outputs, otherargs):
-    """
-    Water occurrence pass (Qiu, 2019). Find spectrally derived water, and create a 
-    histogram of the water occurrence layer for only those water pixels. 
-    
-    A minor inefficiency here, as I am calculating the spectralWater equation
-    again in pass1, but faster to do this than write it out and read it in (I think). 
-    """
-    bandsForNull = numpy.array([config.BAND_RED, config.BAND_NIR])
-    refNullmask = (inputs.toaref[bandsForNull] == otherargs.refNull).any(axis=0)
-    red = otherargs.refBands[config.BAND_RED]
-    nir = otherargs.refBands[config.BAND_NIR]
-
-    ref = inputs.toaref.astype(numpy.float) / otherargs.TOARefScaling
-    # Clamp off any reflectance <= 0
-    ref[ref<=0] = 0.00001
-
-    ndvi = (ref[nir] - ref[red]) / (ref[nir] + ref[red])
-
-    # Zhu, 2012, equation 5
-    spectralWater = (
-        ((ndvi < 0.01) & (ref[nir] < 0.11)) |
-        ((ndvi < 0.1) & (ref[nir] < 0.05))
-    )
-    spectralWater[refNullmask] = False
-    
-    gswo = inputs.gswo[0]
-    otherargs.gswo_hist = accumHist(otherargs.gswo_hist, gswo[spectralWater])
-
-
-def doCirrusNormLookup(fmaskFilenames, fmaskConfig, tmpDEMfile):
-    """
-    Pass over the cirrus band, with the DEM, finding the minimum
-    cirrus reflectance at each level, to use for normalization. 
-    Return a lookup table, indexed by (elevation//100), giving
-    min cirrus ref for each 100m level. 
-    """
-    cirrusLookup = None
-    if fmaskConfig.CIRRUS in fmaskConfig.bands:
-        infiles = applier.FilenameAssociations()
-        outfiles = applier.FilenameAssociations()
-        otherargs = applier.OtherInputs()
-        controls = applier.ApplierControls()
-
-        infiles.cirrus = fmaskFilenames.toaRef
-        infiles.dem = tmpDEMfile
-        otherargs.cirrusLookup = {}
-        otherargs.demStep = 100
-        otherargs.fmaskConfig = fmaskConfig
-        controls.setReferenceImage(tmpDEMfile)
-        controls.setResampleMethod('near')
-
-        applier.apply(calcCirrusLookup, infiles, outfiles, otherargs, controls=controls)
-
-        # Turn the dictionary into an array
-        MT_EVEREST = 8900       # A bit higher than Mt Everest
-        MAXLVL = MT_EVEREST // otherargs.demStep
-        cirrusLookup = numpy.zeros(MAXLVL, dtype=numpy.float32)
-        for lvl in range(MAXLVL):
-            if lvl in otherargs.cirrusLookup:
-                cirrusLookup[lvl] = otherargs.cirrusLookup[lvl]
-            elif lvl > 0:
-                cirrusLookup[lvl] = cirrusLookup[lvl-1]
-            else:
-                cirrusLookup[lvl] = 0
-
-    return cirrusLookup
-
-
-def calcCirrusLookup(info, inputs, outputs, otherargs):
-    """
-    For each 100m elevation level, find the minimum value of cirrus band
-    reflectance at that level. 
-    
-    This is not yet right - we need to restrict to non-PCP pixels. 
-    """
-    cirrus = otherargs.refBands[config.BAND_CIRRUS]
-    ref = inputs.toaref.astype(numpy.float) / otherargs.fmaskConfig.TOARefScaling
-    
-    dem = inputs.dem[0]
-    demLvl = dem // otherargs.demStep
-    demLvlList = numpy.unique(demLvl)
-
-    for lvl in demLvlList:
-        atLevel = (demLvl == lvl)
-        refAtLevel = ref[cirrus][atLevel]
-        minRefAtLevel = refAtLevel.min()
-        if lvl in otherargs.cirrusLookup:
-            if minRefAtLevel < otherargs.cirrusLookup[lvl]:
-                otherargs.cirrusLookup[lvl] = minRefAtLevel
-        else:
-            otherargs.cirrusLookup[lvl] = minRefAtLevel
-
-
 def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal, 
-        woThresh, tmpGSWOfile, tmpDEMfile):
+        tmpGSWOfile, tmpDEMfile):
     """
     Run the first pass of the potential cloud layer. Also
     finds the temperature thresholds which will be needed 
@@ -404,13 +256,10 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
     infiles.gswo = tmpGSWOfile
     infiles.dem = tmpDEMfile
     
+    
     (fd, outfiles.pass1) = tempfile.mkstemp(prefix='pass1', dir=fmaskConfig.tempDir, 
                                 suffix=fmaskConfig.defaultExtension)
     os.close(fd)
-    if (fmaskConfig.sensor == config.FMASK_SENTINEL2) and fmaskConfig.sen2displacementTest:
-        # needs overlap because of focalVariance
-        overlap = int((fmaskConfig.sen2cdiWindow - 1) / 2)
-        controls.setOverlap(overlap)
     controls.setWindowXsize(RIOS_WINDOW_SIZE)
     controls.setWindowYsize(RIOS_WINDOW_SIZE)
     controls.setReferenceImage(infiles.toaref)
@@ -423,8 +272,9 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
     otherargs.waterBT_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
     otherargs.clearLandBT_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
     otherargs.clearLandB4_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
-    otherargs.woThresh = woThresh
+    otherargs.hazeTransform_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.float32)
     otherargs.fmaskConfig = fmaskConfig
+    otherargs.sensor = fmaskConfig.sensor
     refImgInfo = fileinfo.ImageInfo(fmaskFilenames.toaRef)
     otherargs.refNull = refImgInfo.nodataval[0]
     if otherargs.refNull is None:
@@ -435,6 +285,20 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
         otherargs.thermalNull = thermalImgInfo.nodataval[0]
         if otherargs.thermalNull is None:
             otherargs.thermalNull = 0
+    # Need overlap so we can do Fmask's 3x3 fill-in
+    overlap = 1
+    if (fmaskConfig.sensor == config.FMASK_SENTINEL2) and fmaskConfig.sen2displacementTest:
+        # needs overlap because of focalVariance
+        overlap = max(overlap, int((fmaskConfig.sen2cdiWindow - 1) / 2))
+    # Also need overlap for cloud size filter
+    otherargs.minCloudSize = fmaskConfig.minCloudSize_pixels
+    overlap = max(overlap, fmaskConfig.minCloudSize_pixels)
+    controls.setOverlap(overlap)
+
+    # Set RIOS to use a very large block size, so the whole thing is done in one block, allowing
+    # it to be done with a single pass. This will be very memory-hungry, so this is an experiment. 
+    controls.setWindowXsize(refImgInfo.ncols)
+    controls.setWindowYsize(refImgInfo.nrows)
     
     # Which reflective bands do we use to make a null mask. The numbers being set here 
     # are zero-based index numbers for use as array indexes. It should be just all bands, 
@@ -461,17 +325,7 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
 
     applier.apply(potentialCloudFirstPass, infiles, outfiles, otherargs, controls=controls)
     
-    (Twater, Tlow, Thigh) = calcBTthresholds(otherargs)
-    
-    # 17.5 percentile of band 4, for clear land pixels. Used later in shadow masking. 
-    b4_17 = scoreatpcnt(otherargs.clearLandB4_hist, 17.5)
-    if b4_17 is not None:
-        b4_17 = b4_17 / B4_SCALE
-    else:
-        # Not enough land to work this out, so guess a low value. 
-        b4_17 = 0.01
-    
-    return (outfiles.pass1, Twater, Tlow, Thigh, b4_17)
+    return (outfiles.pass1, otherargs.nir_17, otherargs.Tlow, otherargs.Thigh)
 
 
 def potentialCloudFirstPass(info, inputs, outputs, otherargs):
@@ -507,6 +361,7 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     else:
         thermNullmask = numpy.zeros_like(ref[0], dtype=numpy.bool)
         nullmask = refNullmask
+    notNull = ~nullmask
     
     # Equation 1
     ndsi = (ref[green] - ref[swir1]) / (ref[green] + ref[swir1])
@@ -525,8 +380,9 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     # Modified as per Frantz 2015, corresponding to his "darkness test" - make this a parameter......
     whitenessTest = ((whiteness < fmaskConfig.Eqn2WhitenessThresh) & (meanVis > 0.15))
     
-    # Haze test, equation 3
-    hazeTest = ((ref[blue] - 0.5 * ref[red] - 0.08) > 0)
+    # Haze transform, Qiu 2019, equation 2
+    hazeTransform = (ref[blue] - 0.5 * ref[red] - 0.08)
+    hazeTest = (hazeTransform > 0)
     
     # Equation 4
     b45test = ((ref[nir] / ref[swir1]) > 0.75)
@@ -536,20 +392,32 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         ((ndvi < 0.01) & (ref[nir] < 0.11)) |
         ((ndvi < 0.1) & (ref[nir] < 0.05))
     )
-    # Qiu 2019, equation 1
-    waterTest = waterTest | (inputs.gswo[0] > otherargs.woThresh)
-    # Qiu 2019 also says that snow/ice should be masked, but their MATLAB code 
-    # has this commented out, so I don't do it either. 
-
     waterTest[nullmask] = False
+    # Qiu 2019, equation 1. Extra checks copied from MATLAB DetectWater.m
+    if numpy.count_nonzero(waterTest) > 0 and inputs.gswo[0][notNull].sum() > 0:
+        woThresh = numpy.percentile(inputs.gswo[0][waterTest & (notNull)], 17.5) - 5
+        if woThresh > 0:
+            waterTest = waterTest | (inputs.gswo[0] > woThresh)
+            # Qiu 2019 also says that snow/ice should be masked, but their MATLAB code 
+            # has this commented out, so I don't do it either. 
+
+            waterTest[nullmask] = False
+    
+    # Equation 6. Potential cloud pixels (first pass)
+    pcp = basicTest & whitenessTest & hazeTest & b45test
     
     if config.BAND_CIRRUS in otherargs.refBands:
         # Zhu et al 2015, section 2.2.1. 
         cirrus = otherargs.refBands[config.BAND_CIRRUS]
+        # Qiu 2019, section 3.1.2
+        ref[cirrus] = normalizeCirrus(ref[cirrus], pcp, inputs.dem[0])
         cirrusBandTest = (ref[cirrus] > fmaskConfig.cirrusBandTestThresh)
     
-    # Equation 6. Potential cloud pixels (first pass)
-    pcp = basicTest & whitenessTest & hazeTest & b45test
+    # Include cirrusBandTest, from 2015 paper. Zhu et al. are not clear whether it is
+    # supposed to be combined with previous tests using AND or OR, so I tried both
+    # and picked what seemed best. 
+    if config.BAND_CIRRUS in otherargs.refBands:
+        pcp = (pcp | cirrusBandTest)
     
     # If Sentinel-2, we can use the Frantz 2018 displacement test
     if (fmaskConfig.sensor == config.FMASK_SENTINEL2) and fmaskConfig.sen2displacementTest:
@@ -562,12 +430,6 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         selection = scipy.ndimage.binary_dilation(selection, mask=rg_mask, iterations=0)
         pcp[~selection] = False
 
-    # Include cirrusBandTest, from 2015 paper. Zhu et al. are not clear whether it is
-    # supposed to be combined with previous tests using AND or OR, so I tried both
-    # and picked what seemed best. 
-    if config.BAND_CIRRUS in otherargs.refBands:
-        pcp = (pcp | cirrusBandTest)
-    
     # This is an extra saturation test added by DERM, and is not part of the Fmask algorithm. 
     # However, some cloud centres are saturated, and thus fail the whiteness and haze tests
     if hasattr(inputs, 'saturationMask'):
@@ -580,12 +442,20 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     pcp[nullmask] = False
     
     # Equation 7
-    clearSkyWater = numpy.logical_and(waterTest, ref[swir2] < fmaskConfig.Eqn7Swir2Thresh)
+    clearSkyWater = (waterTest & (ref[swir2] < fmaskConfig.Eqn7Swir2Thresh))
     clearSkyWater[nullmask] = False
     
     # Equation 12
-    clearLand = numpy.logical_and(numpy.logical_not(pcp), numpy.logical_not(waterTest))
+    clearLand = ((~pcp) & (~waterTest))
     clearLand[nullmask] = False
+    
+    # Equation 20
+    # In two parts, in case we are missing thermal
+    snowmask = ((ndsi > 0.15) & (ref[nir] > fmaskConfig.Eqn20NirSnowThresh) & 
+        (ref[green] > fmaskConfig.Eqn20GreenSnowThresh))
+    if hasattr(inputs, 'thermal'):
+        snowmask = snowmask & (bt < fmaskConfig.Eqn20ThermThresh)
+    snowmask[nullmask] = False
     
     # Equation 15
     # Need to modify ndvi/ndsi by saturation......
@@ -603,146 +473,8 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     ndbi = ((ref[swir1] - ref[nir]) / (ref[swir1] + ref[nir]))
     maxNdx = numpy.maximum(maxNdx, numpy.absolute(ndbi))
     
-    variabilityProb = 1 - maxNdx
-    variabilityProb[nullmask] = 0
-    variabilityProbPcnt = numpy.round(variabilityProb * PROB_SCALE)
-    variabilityProbPcnt = variabilityProbPcnt.clip(BYTE_MIN, BYTE_MAX).astype(numpy.uint8)
-    
-    # Equation 20
-    # In two parts, in case we are missing thermal
-    snowmask = ((ndsi > 0.15) & (ref[nir] > fmaskConfig.Eqn20NirSnowThresh) & 
-        (ref[green] > fmaskConfig.Eqn20GreenSnowThresh))
-    if hasattr(inputs, 'thermal'):
-        snowmask = snowmask & (bt < fmaskConfig.Eqn20ThermThresh)
-    snowmask[nullmask] = False
-    
-    # Output the pcp and water test layers. 
-    outputs.pass1 = numpy.array([pcp, waterTest, clearLand, variabilityProbPcnt, 
-        nullmask, snowmask, refNullmask, thermNullmask])
-    
-    # Accumulate histograms of temperature for land and water separately
-    if hasattr(inputs, 'thermal'):
-        scaledBT = (bt + BT_OFFSET).clip(0, BT_HISTSIZE)
-        otherargs.waterBT_hist = accumHist(otherargs.waterBT_hist, scaledBT[clearSkyWater])
-        otherargs.clearLandBT_hist = accumHist(otherargs.clearLandBT_hist, scaledBT[clearLand])
-    scaledB4 = (ref[nir] * B4_SCALE).astype(numpy.uint8)
-    otherargs.clearLandB4_hist = accumHist(otherargs.clearLandB4_hist, scaledB4[clearLand])
-
-
-def accumHist(counts, vals):
-    """
-    Accumulate the given values into the given (partial) counts
-    """
-    (valsHist, edges) = numpy.histogram(vals, bins=BT_HISTSIZE, range=(0, BT_HISTSIZE))
-    # some versions of numpy seem to give an error if dtypes don't match here
-    counts += valsHist.astype(counts.dtype)
-    return counts
-
-
-def scoreatpcnt(counts, pcnt):
-    """
-    Given histogram counts (binned on the range 0-255), find the value
-    which corresponds to the given percentile value (0-100). 
-    
-    """
-    n = None
-    
-    total = counts.sum()
-    if total > 0:
-        # Cumulative counts as percentages
-        cumHist = numpy.cumsum(counts) * 100.0 / total
-        (gtNdx, ) = numpy.where(cumHist >= pcnt)
-        if len(gtNdx) > 0:
-            n = gtNdx[0]
-        else:
-            n = 255
-    return n
-
-
-def calcBTthresholds(otherargs):
-    """
-    Calculate some global thresholds based on the results of the first pass
-    """
-    # Equation 8
-    Twater = scoreatpcnt(otherargs.waterBT_hist, 82.5)
-    if Twater is not None:
-        Twater = Twater - BT_OFFSET
-    # Equation 13
-    Tlow = scoreatpcnt(otherargs.clearLandBT_hist, 17.5)
-    if Tlow is not None:
-        Tlow = Tlow - BT_OFFSET
-    Thigh = scoreatpcnt(otherargs.clearLandBT_hist, 82.5)
-    if Thigh is not None:
-        Thigh = Thigh - BT_OFFSET
-    return (Twater, Tlow, Thigh)
-
-#: For scaling probability values so I can store them in 8 bits
-PROB_SCALE = 100.0
-
-def doPotentialCloudSecondPass(fmaskFilenames, fmaskConfig, pass1file, 
-                Twater, Tlow, Thigh, missingThermal):
-    """
-    Second pass for potential cloud layer
-    """
-    infiles = applier.FilenameAssociations()
-    outfiles = applier.FilenameAssociations()
-    otherargs = applier.OtherInputs()
-    controls = applier.ApplierControls()
-    
-    infiles.pass1 = pass1file
-    infiles.toaref = fmaskFilenames.toaRef
-    if not missingThermal:
-        infiles.thermal = fmaskFilenames.thermal
-    (fd, outfiles.pass2) = tempfile.mkstemp(prefix='pass2', dir=fmaskConfig.tempDir, 
-                                    suffix=fmaskConfig.defaultExtension)
-    os.close(fd)
-    otherargs.refBands = fmaskConfig.bands
-    otherargs.thermalInfo = fmaskConfig.thermalInfo
-    
-    otherargs.Twater = Twater
-    otherargs.Tlow = Tlow
-    otherargs.Thigh = Thigh
-    otherargs.lCloudProb_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
-    otherargs.fmaskConfig = fmaskConfig
-    
-    controls.setWindowXsize(RIOS_WINDOW_SIZE)
-    controls.setWindowYsize(RIOS_WINDOW_SIZE)
-    controls.setReferenceImage(fmaskFilenames.toaRef)
-    controls.setCalcStats(False)
-    
-    applier.apply(potentialCloudSecondPass, infiles, outfiles, otherargs, controls=controls)
-    
-    # Equation 17
-    landThreshold = scoreatpcnt(otherargs.lCloudProb_hist, 82.5)
-    if landThreshold is not None:
-        landThreshold = landThreshold / PROB_SCALE + fmaskConfig.Eqn17CloudProbThresh
-    else:
-        landThreshold = fmaskConfig.Eqn17CloudProbThresh
-    return (outfiles.pass2, landThreshold)
-
-
-def potentialCloudSecondPass(info, inputs, outputs, otherargs):
-    """
-    Called from RIOS
-    
-    Second pass of potential cloud layer
-    """
-    fmaskConfig = otherargs.fmaskConfig
-    
-    ref = inputs.toaref.astype(numpy.float) / fmaskConfig.TOARefScaling
-    # Clamp off any reflectance <= 0
-    ref[ref<=0] = 0.00001
-    
-    if hasattr(inputs, 'thermal'):
-        # Brightness temperature in degrees C
-        bt = otherargs.thermalInfo.scaleThermalDNtoC(inputs.thermal)
-        
-    Twater = otherargs.Twater
-    (Tlow, Thigh) = (otherargs.Tlow, otherargs.Thigh)
-    # Values from first pass
-    clearLand = inputs.pass1[2].astype(numpy.bool)
-    variabilityProbPcnt = inputs.pass1[3]
-    variability_prob = variabilityProbPcnt / PROB_SCALE
+    variability_prob = 1 - maxNdx
+    variability_prob[nullmask] = 0
     
     # Cirrus band. From Zhu et al 2015, equation 1
     if config.BAND_CIRRUS in otherargs.refBands:
@@ -750,11 +482,15 @@ def potentialCloudSecondPass(info, inputs, outputs, otherargs):
         cirrusProb = ref[cirrus] / fmaskConfig.cirrusProbRatio
 
     # Equation 9
-    if Twater is not None:
-        wTemperature_prob = (Twater - bt) / 4.0
-    else:
-        # There is no water, so who cares. 
-        wTemperature_prob = 1
+    wTemperature_prob = 1
+    (Tlow, Thigh, Twater) = (None, None, None)
+    if hasattr(inputs, 'thermal'):
+        if len(clearSkyWater) > 0:
+            Twater = numpy.percentile(bt[clearSkyWater], 82.5)
+            wTemperature_prob = (Twater - bt) / 4.0
+        if len(clearLand) > 0:
+            Tlow = numpy.percentile(bt[clearLand], 17.5)
+            Thigh = numpy.percentile(bt[clearLand], 82.5)
     
     swir1 = otherargs.refBands[config.BAND_SWIR1]
     # Equation 10
@@ -777,76 +513,9 @@ def potentialCloudSecondPass(info, inputs, outputs, otherargs):
     lCloud_prob = lTemperature_prob * variability_prob
     if config.BAND_CIRRUS in otherargs.refBands:
         lCloud_prob += cirrusProb
-    
-    outstack = numpy.array([
-        (wCloud_prob * PROB_SCALE).clip(BYTE_MIN, BYTE_MAX), 
-        (lCloud_prob * PROB_SCALE).clip(BYTE_MIN, BYTE_MAX)], dtype=numpy.uint8)
-    outputs.pass2 = outstack
-    
-    # Accumulate histogram of lCloud_prob
-    scaledProb = (lCloud_prob * PROB_SCALE).clip(BYTE_MIN, BYTE_MAX).astype(numpy.uint8)
-    otherargs.lCloudProb_hist = accumHist(otherargs.lCloudProb_hist, scaledProb[clearLand])
 
-
-def doCloudLayerFinalPass(fmaskFilenames, fmaskConfig, pass1file, pass2file, 
-                    landThreshold, Tlow, missingThermal):
-    """
-    Final pass
-    """
-    infiles = applier.FilenameAssociations()
-    outfiles = applier.FilenameAssociations()
-    otherargs = applier.OtherInputs()
-    controls = applier.ApplierControls()
-    
-    infiles.pass1 = pass1file
-    infiles.pass2 = pass2file
-    if not missingThermal:
-        infiles.thermal = fmaskFilenames.thermal
-    otherargs.landThreshold = landThreshold
-    otherargs.Tlow = Tlow
-    otherargs.thermalInfo = fmaskConfig.thermalInfo
-    otherargs.minCloudSize = fmaskConfig.minCloudSize_pixels
-    otherargs.sensor = fmaskConfig.sensor
-
-    (fd, outfiles.cloudmask) = tempfile.mkstemp(prefix='interimcloud', 
-        dir=fmaskConfig.tempDir, suffix=fmaskConfig.defaultExtension)
-    os.close(fd)
-    # Need overlap so we can do Fmask's 3x3 fill-in
-    overlap = 1
-    # Also need overlap for cloud size filter
-    overlap = max(overlap, fmaskConfig.minCloudSize_pixels)
-        
-    controls.setOverlap(overlap)
-    controls.setWindowXsize(RIOS_WINDOW_SIZE)
-    controls.setWindowYsize(RIOS_WINDOW_SIZE)
-    controls.setReferenceImage(pass1file)
-    controls.setCalcStats(False)
-    
-    applier.apply(cloudFinalPass, infiles, outfiles, otherargs, controls=controls)
-    
-    return outfiles.cloudmask
-
-
-def cloudFinalPass(info, inputs, outputs, otherargs):
-    """
-    Called from RIOS
-    
-    Final pass of cloud mask layer
-    """
-    nullmask = inputs.pass1[4].astype(numpy.bool)
-    pcp = inputs.pass1[0].astype(numpy.bool)
-    waterTest = inputs.pass1[1].astype(numpy.bool)
-    notWater = numpy.logical_not(waterTest)
-    notWater[nullmask] = False
-    wCloud_prob = inputs.pass2[0] / PROB_SCALE
-    lCloud_prob = inputs.pass2[1] / PROB_SCALE
-    if hasattr(inputs, 'thermal'):
-        # Brightness temperature in degrees C
-        bt = otherargs.thermalInfo.scaleThermalDNtoC(inputs.thermal)
-        
-    landThreshold = otherargs.landThreshold
-    Tlow = otherargs.Tlow
-    
+    notWater = ~waterTest
+    landThreshold = numpy.percentile(lCloud_prob, 82.5)
     cloudmask1 = pcp & waterTest & (wCloud_prob>0.5)
     cloudmask2 = pcp & notWater & (lCloud_prob>landThreshold)
     # according to [Zhu 2015] the lCloudprob > 0.99 test should be removed.
@@ -880,13 +549,44 @@ def cloudFinalPass(info, inputs, outputs, otherargs):
     bufferedCloudmask = (uniform_filter(cloudmask*2.0, size=3) >= 1.0)
 
     bufferedCloudmask[nullmask] = 0
+
+    # Output the pcp and water test layers. 
+    outputs.pass1 = numpy.array([bufferedCloudmask, nullmask, snowmask, waterTest])
     
-    outputs.cloudmask = numpy.array([bufferedCloudmask])
+    otherargs.nir_17 = None
+    if numpy.count_nonzero(clearLand) > 0:
+        otherargs.nir_17 = numpy.percentile(ref[nir][clearLand], 17.5)
+    otherargs.Tlow = Tlow
+    otherargs.Thigh = Thigh
+    
+    from rsc.utils import procstatus
+    print('Mem usage at end of pass1', procstatus.getMemUsage()/1024/1024/1024, 'Gb')
+
+
+def normalizeCirrus(cirrusRef, pcp, dem, demStep):
+    """
+    Normalize the cirrus reflectance by land elevation, using the
+    method of Qiu et al 2019 (section 3.1.2). This code is translated 
+    from their MATLAB NormalizaCirrusDEM.m, and so includes the details 
+    omitted from the paper. 
+    """
+    cirrusLookup = 
+    demLvl = dem // demStep
+    demLvlList = numpy.unique(demLvl)
+    # Don't care about below sea level
+    demLvlList = demLvlList.clip(0)
+
+    for lvl in demLvlList:
+        atLevel = (demLvl == lvl)
+        refAtLevel = cirrusRef[atLevel & ~pcp]
+        minRefAtLevel = refAtLevel.min()
+        cirrusLookup[lvl] = minRefAtLevel
+    
 
 
 def doPotentialShadows(fmaskFilenames, fmaskConfig, NIR_17):
     """
-    Make potential shadow layer, as per section 3.1.3 of Zhu&Woodcock. 
+    Make potential shadow layer, as per section 3.1.3 of Zhu&Woodcock 2012. 
     """
     (fd, potentialShadowsFile) = tempfile.mkstemp(prefix='shadows', dir=fmaskConfig.tempDir, 
                                         suffix=fmaskConfig.defaultExtension)
@@ -1225,7 +925,7 @@ def matchShadows(fmaskConfig, interimCloudmask, potentialShadowsFile,
     proj = ds.GetProjection()
     del ds
     ds = gdal.Open(pass1file)
-    band = ds.GetRasterBand(5)
+    band = ds.GetRasterBand(2)
     (xoff, yoff) = topLeftDict[pass1file]
     nullmask = band.ReadAsArray(xoff, yoff, ncols, nrows).astype(numpy.bool)
     del ds
@@ -1457,15 +1157,15 @@ def maskAndBuffer(info, inputs, outputs, otherargs):
            mask, even after buffering, etc. 
     
     """
-    snow = inputs.pass1[5].astype(numpy.bool)
-    nullmask = inputs.pass1[4].astype(numpy.bool)
-    refNullmask = inputs.pass1[6].astype(numpy.bool)
-    thermNullmask = inputs.pass1[7].astype(numpy.bool)
+    snow = inputs.pass1[2].astype(numpy.bool)
+    nullmask = inputs.pass1[1].astype(numpy.bool)
+#    refNullmask = inputs.pass1[3].astype(numpy.bool)
+#    thermNullmask = inputs.pass1[5].astype(numpy.bool)
     resetNullmask = nullmask
 
     cloud = inputs.cloud[0].astype(numpy.bool)
     shadow = inputs.shadow[0].astype(numpy.bool)
-    water = inputs.pass1[1].astype(numpy.bool)
+    water = inputs.pass1[3].astype(numpy.bool)
     
     # Buffer the cloud
     if hasattr(otherargs, 'bufferkernel'):
@@ -1495,7 +1195,7 @@ def maskAndBuffer(info, inputs, outputs, otherargs):
     out[shadow] = OUTCODE_SHADOW
     out[snow] = OUTCODE_SNOW
     out[water] = OUTCODE_WATER
-    out[resetNullmask] = outNullval
+    out[nullmask] = outNullval
     outputs.out = numpy.array([out])
 
 
