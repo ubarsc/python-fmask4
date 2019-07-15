@@ -218,10 +218,10 @@ def tempSubsetGlobalAux(toaRefFile, globalAuxFile, tmpPrefix, fmaskConfig):
     imginfo = fileinfo.ImageInfo(toaRefFile)
     globalinfo = fileinfo.ImageInfo(globalAuxFile)
     (ulx, uly, urx, ury, llx, lly, lrx, lry) = imginfo.getCorners(outWKT=globalinfo.projection)
-    left = min(ulx, urx, llx, lrx)
-    right = max(ulx, urx, llx, lrx)
-    top = max(uly, ury, lly, lry)
-    bottom = min(uly, ury, lly, lry)
+    left = min(ulx, urx, llx, lrx) - globalinfo.xRes
+    right = max(ulx, urx, llx, lrx) + globalinfo.xRes
+    top = max(uly, ury, lly, lry) + globalinfo.yRes
+    bottom = min(uly, ury, lly, lry) - globalinfo.yRes
     
     # Need to get Sam to help with Windoze-compatible details of finding gdal_translate
     cmdList = ["gdal_translate", "-q", "-of", "GTiff", "-co", "COMPRESS=DEFLATE", 
@@ -268,6 +268,7 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
     otherargs.refBands = fmaskConfig.bands  
     otherargs.thermalInfo = fmaskConfig.thermalInfo
     otherargs.fmaskConfig = fmaskConfig
+    otherargs.minCloudSize = fmaskConfig.minCloudSize_pixels
     refImgInfo = fileinfo.ImageInfo(fmaskFilenames.toaRef)
     otherargs.refNull = refImgInfo.nodataval[0]
     if otherargs.refNull is None:
@@ -296,10 +297,8 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
             config.BAND_SWIR1, config.BAND_SWIR2, config.BAND_CIRRUS]
 
     elif fmaskConfig.sensor == config.FMASK_SENTINEL2:
-        # For Sentinel-2, only use the visible bands to define the null mask. This is because ESA
-        # are leaving a lot of spurious nulls in their imagery, most particularly in the IR bands
-        # and the cirrus band. 
-        nullBandNdx = [config.BAND_BLUE, config.BAND_GREEN, config.BAND_RED]
+        nullBandNdx = [config.BAND_BLUE, config.BAND_GREEN, config.BAND_RED, config.BAND_NIR, 
+            config.BAND_SWIR1, config.BAND_SWIR2, config.BAND_CIRRUS]
 
     else:
         msg = 'Unknown sensor'
