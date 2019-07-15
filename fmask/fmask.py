@@ -279,15 +279,6 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
         otherargs.thermalNull = thermalImgInfo.nodataval[0]
         if otherargs.thermalNull is None:
             otherargs.thermalNull = 0
-    # Need overlap so we can do Fmask's 3x3 fill-in
-    overlap = 1
-    if (fmaskConfig.sensor == config.FMASK_SENTINEL2) and fmaskConfig.sen2displacementTest:
-        # needs overlap because of focalVariance
-        overlap = max(overlap, int((fmaskConfig.sen2cdiWindow - 1) / 2))
-    # Also need overlap for cloud size filter
-    otherargs.minCloudSize = fmaskConfig.minCloudSize_pixels
-    overlap = max(overlap, fmaskConfig.minCloudSize_pixels)
-    controls.setOverlap(overlap)
 
     # Set RIOS to use a very large block size, so the whole thing is done in one block, allowing
     # it to be done with a single pass. This will be very memory-hungry, so this is an experiment. 
