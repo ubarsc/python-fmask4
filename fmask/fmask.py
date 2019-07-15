@@ -269,10 +269,6 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
 
     otherargs.refBands = fmaskConfig.bands  
     otherargs.thermalInfo = fmaskConfig.thermalInfo
-    otherargs.waterBT_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
-    otherargs.clearLandBT_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
-    otherargs.clearLandB4_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.uint32)
-    otherargs.hazeTransform_hist = numpy.zeros(BT_HISTSIZE, dtype=numpy.float32)
     otherargs.fmaskConfig = fmaskConfig
     otherargs.sensor = fmaskConfig.sensor
     refImgInfo = fileinfo.ImageInfo(fmaskFilenames.toaRef)
@@ -496,12 +492,17 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     swir1 = otherargs.refBands[config.BAND_SWIR1]
     # Equation 10
     brightness_prob = numpy.minimum(ref[swir1], 0.11) / 0.11
+
+    # In qiu 2019, cirrus probability has a higher weight for Sentinel than Landsat
+    cirrusWeight = 0.3
+    if fmaskConfig.sensor == config.FMASK_SENTINEL2:
+        cirrusWeight = 0.5
     
     # Equation 11
     wCloud_prob = wTemperature_prob * brightness_prob
     # Zhu et al 2015, equation 2
     if config.BAND_CIRRUS in otherargs.refBands:
-        wCloud_prob += cirrusProb
+        wCloud_prob += cirrusWeight * cirrusProb
     
     # Equation 14
     if Thigh is not None and Tlow is not None:
@@ -511,12 +512,22 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         lTemperature_prob = 1
     
     # Equation 16
-    lCloud_prob = lTemperature_prob * variability_prob
+    if fmaskConfig.sensor in (config.FMASK_LANDSAT47, config.FMASK_LANDSAT8):
+        lCloud_prob = lTemperature_prob * variability_prob
+    elif fmaskConfig.sensor == config.FMASK_SENTINEL2:
+        # Qiu 2019, table 2, for Sentinel-2 only
+        hazeLow = numpy.percentile(hazeTransform[clearLand], 17.5)
+        hazeHigh = numpy.percentile(hazeTransform[clearLand], 82.5)
+        # Qiu 2019, equation 3
+        lHot = (hazeTransform - (hazeLow - 0.04)) / ((hazeHigh + 0.04) - (hazeLow - 0.04))
+        lHot = lHot.clip(0, 1)      # From MATLAB problBrightness.m
+        lCloud_prob = variability_prob * lHot
+
     if config.BAND_CIRRUS in otherargs.refBands:
-        lCloud_prob += cirrusProb
+        lCloud_prob += cirrusWeight * cirrusProb
 
     notWater = ~waterTest
-    landThreshold = numpy.percentile(lCloud_prob, 82.5)
+    landThreshold = numpy.percentile(lCloud_prob[clearLand], 82.5) + fmaskConfig.Eqn17CloudProbThresh
     cloudmask1 = pcp & waterTest & (wCloud_prob>0.5)
     cloudmask2 = pcp & notWater & (lCloud_prob>landThreshold)
     # according to [Zhu 2015] the lCloudprob > 0.99 test should be removed.
