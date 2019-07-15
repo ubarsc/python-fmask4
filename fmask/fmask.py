@@ -260,8 +260,6 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
     (fd, outfiles.pass1) = tempfile.mkstemp(prefix='pass1', dir=fmaskConfig.tempDir, 
                                 suffix=fmaskConfig.defaultExtension)
     os.close(fd)
-    controls.setWindowXsize(RIOS_WINDOW_SIZE)
-    controls.setWindowYsize(RIOS_WINDOW_SIZE)
     controls.setReferenceImage(infiles.toaref)
     controls.setResampleMethod('near', imagename='gswo')
     controls.setResampleMethod('near', imagename='dem')
@@ -493,7 +491,7 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     # Equation 10
     brightness_prob = numpy.minimum(ref[swir1], 0.11) / 0.11
 
-    # In qiu 2019, cirrus probability has a higher weight for Sentinel than Landsat
+    # In Qiu 2019, cirrus probability has a higher weight for Sentinel than Landsat
     cirrusWeight = 0.3
     if fmaskConfig.sensor == config.FMASK_SENTINEL2:
         cirrusWeight = 0.5
@@ -537,6 +535,8 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         cloudmask3 = numpy.zeros(cloudmask1.shape, dtype=numpy.bool)
     else:
         cloudmask3 = (lCloud_prob > 0.99) & notWater
+    del notWater
+
     if Tlow is not None:
         cloudmask4 = (bt < (Tlow-35))
     else:
@@ -570,6 +570,8 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         otherargs.nir_17 = numpy.percentile(ref[nir][clearLand], 17.5)
     otherargs.Tlow = Tlow
     otherargs.Thigh = Thigh
+    print('Twater', Twater, 'Tlow', Tlow, 'Thigh', Thigh, 'NIR_17', otherargs.nir_17, 
+        'landThreshold', landThreshold)
     
     from rsc.utils import procstatus
     print('Mem usage at end of pass1', round(procstatus.getMemUsage()/1024/1024/1024, 1), 'Gb')
