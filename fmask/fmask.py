@@ -268,7 +268,6 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
     otherargs.refBands = fmaskConfig.bands  
     otherargs.thermalInfo = fmaskConfig.thermalInfo
     otherargs.fmaskConfig = fmaskConfig
-    otherargs.sensor = fmaskConfig.sensor
     refImgInfo = fileinfo.ImageInfo(fmaskFilenames.toaRef)
     otherargs.refNull = refImgInfo.nodataval[0]
     if otherargs.refNull is None:
@@ -522,7 +521,7 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     # according to [Zhu 2015] the lCloudprob > 0.99 test should be removed.
     # For now I only disabled it for S2, because it gives a lot of false
     # positives due to missing a thermal band.
-    if (otherargs.sensor == config.FMASK_SENTINEL2):
+    if (fmaskConfig.sensor == config.FMASK_SENTINEL2):
         cloudmask3 = numpy.zeros(cloudmask1.shape, dtype=numpy.bool)
     else:
         cloudmask3 = (lCloud_prob > 0.99) & notWater
