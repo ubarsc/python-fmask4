@@ -94,10 +94,6 @@ class FmaskConfig(object):
     cirrusProbRatio = 0.04
     Eqn19NIRFillThresh = 0.02
     
-    # Constant term at the end of Equation 17. Zhu's MATLAB code now has this as a configurable
-    # value, which they recommend as 22.5% (i.e. 0.225)
-    Eqn17CloudProbThresh = 0.2
-    
     # GDAL driver for final output file
     gdalDriverName = applier.DEFAULTDRIVERNAME
     
@@ -158,6 +154,15 @@ class FmaskConfig(object):
             self.defaultExtension = '.tmp'
         else:
             self.defaultExtension = '.' + ext
+
+        # Constant term at the end of Equation 17. Qiu 2019 now recommend
+        # this should default to different values per sensor
+        if sensor == FMASK_LANDSAT47:
+            self.Eqn17CloudProbThresh = 0.1
+        elif sensor == FMASK_LANDSAT8:
+            self.Eqn17CloudProbThresh = 0.175
+        elif sensor == FMASK_SENTINEL2:
+            self.Eqn17CloudProbThresh = 0.2
         
     def setReflectiveBand(self, band, index):
         """
