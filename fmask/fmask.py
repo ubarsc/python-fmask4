@@ -405,6 +405,7 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     
     # Equation 6. Potential cloud pixels (first pass)
     pcp = basicTest & whitenessTest & hazeTest & b45test
+    pcp[nullmask] = False
     
     if config.BAND_CIRRUS in otherargs.refBands:
         # Zhu et al 2015, section 2.2.1. 
@@ -560,28 +561,33 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     otherargs.Thigh = Thigh
     
     from rsc.utils import procstatus
-    print('Mem usage at end of pass1', procstatus.getMemUsage()/1024/1024/1024, 'Gb')
+    print('Mem usage at end of pass1', round(procstatus.getMemUsage()/1024/1024/1024, 1), 'Gb')
 
 
-def normalizeCirrus(cirrusRef, pcp, dem, demStep):
+def normalizeCirrus(refCirrus, pcp, dem):
     """
     Normalize the cirrus reflectance by land elevation, using the
     method of Qiu et al 2019 (section 3.1.2). This code is translated 
     from their MATLAB NormalizaCirrusDEM.m, and so includes the details 
     omitted from the paper. 
     """
-    cirrusLookup = 
-    demLvl = dem // demStep
+    demStep = 100   # metres
+    demLvl = dem.clip(0) // demStep
     demLvlList = numpy.unique(demLvl)
-    # Don't care about below sea level
-    demLvlList = demLvlList.clip(0)
 
+    refCirrusNormed = numpy.zeros(refCirrus.shape, dtype=refCirrus.dtype)
     for lvl in demLvlList:
         atLevel = (demLvl == lvl)
-        refAtLevel = cirrusRef[atLevel & ~pcp]
-        minRefAtLevel = refAtLevel.min()
-        cirrusLookup[lvl] = minRefAtLevel
-    
+        atLevelAndClear = (atLevel & ~pcp)
+        if numpy.count_nonzero(atLevelAndClear) > 0:
+            refAtLevel = refCirrus[atLevelAndClear]
+            # The paper says the minimum reflectance at this level, but the MATLAB
+            # code actually uses the percentile 2 value
+            minRefAtLevel = numpy.percentile(refAtLevel, 2)
+            # Subtract this from all reflectance at this level
+            refCirrusNormed[atLevel] = refCirrus[atLevel] - minRefAtLevel
+
+    return refCirrusNormed
 
 
 def doPotentialShadows(fmaskFilenames, fmaskConfig, NIR_17):
