@@ -279,6 +279,7 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
         otherargs.thermalNull = thermalImgInfo.nodataval[0]
         if otherargs.thermalNull is None:
             otherargs.thermalNull = 0
+    otherargs.pixsize = refImgInfo.xRes
 
     # Set RIOS to use a very large block size, so the whole thing is done in one block, allowing
     # it to be done with a single pass. This will be very memory-hungry, so this is an experiment. 
@@ -403,6 +404,24 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     # and picked what seemed best. 
     if config.BAND_CIRRUS in otherargs.refBands:
         pcp = (pcp | cirrusBandTest)
+
+    # Equation 20
+    # In two parts, in case we are missing thermal
+    snowmask = ((ndsi > 0.15) & (ref[nir] > fmaskConfig.Eqn20NirSnowThresh) & 
+        (ref[green] > fmaskConfig.Eqn20GreenSnowThresh))
+    if hasattr(inputs, 'thermal'):
+        snowmask = snowmask & (bt < fmaskConfig.Eqn20ThermThresh)
+    snowmask[nullmask] = False
+    
+    # Qiu 2019 spectral-contextual snow test (equation 4). Removes snow pixels incorrectly
+    # classified as potential cloud. Only do this is there is lots of snow/ice present.
+    # The test is taken from their MATLAB. 110889 is 333**2, but very mysterious 
+    if numpy.count_nonzero(snowmask) > 110889:
+        sd10 = stdDev10km(ref[green], notNull, otherargs.pixsize)
+        scsi10 = sd10 * (1 - ndsi)
+        trueSnow = (scsi10 > 0.0009) & snowmask
+        pcp[trueSnow] = False
+        del sd1, scsi10, trueSnow
     
     # If Sentinel-2, we can use the Frantz 2018 displacement test
     if (fmaskConfig.sensor == config.FMASK_SENTINEL2) and fmaskConfig.sen2displacementTest:
@@ -436,14 +455,6 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     # Equation 12
     clearLand = ((~pcp) & (~waterTest))
     clearLand[nullmask] = False
-    
-    # Equation 20
-    # In two parts, in case we are missing thermal
-    snowmask = ((ndsi > 0.15) & (ref[nir] > fmaskConfig.Eqn20NirSnowThresh) & 
-        (ref[green] > fmaskConfig.Eqn20GreenSnowThresh))
-    if hasattr(inputs, 'thermal'):
-        snowmask = snowmask & (bt < fmaskConfig.Eqn20ThermThresh)
-    snowmask[nullmask] = False
     
     # Equation 15
     # Need to modify ndvi/ndsi by saturation......
