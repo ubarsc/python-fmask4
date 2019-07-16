@@ -339,11 +339,12 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     if hasattr(inputs, 'thermal'):
         thermNullmask = (inputs.thermal[THERM] == otherargs.thermalNull)
         nullmask = (refNullmask | thermNullmask)
+        del thermNullmask
         # Brightness temperature in degrees C
         bt = otherargs.thermalInfo.scaleThermalDNtoC(inputs.thermal)
     else:
-        thermNullmask = numpy.zeros_like(ref[0], dtype=numpy.bool)
         nullmask = refNullmask
+    del refNullmask
     notNull = ~nullmask
     
     # Equation 1
@@ -413,6 +414,7 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         rg_mask = pcp & (cdi < -0.25)
         selection = scipy.ndimage.binary_dilation(selection, mask=rg_mask, iterations=0)
         pcp[~selection] = False
+        del selection, ratio8a8, ratio8a7, v8a8, v8a7, cdi, rg_mask
 
     # This is an extra saturation test added by DERM, and is not part of the Fmask algorithm. 
     # However, some cloud centres are saturated, and thus fail the whiteness and haze tests
@@ -422,6 +424,8 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         saturatedAndBright = saturatedVis & veryBright
         pcp[saturatedAndBright] = True
         whiteness[saturatedAndBright] = 0
+        del veryBright, saturatedVis
+    del meanVis
     
     pcp[nullmask] = False
     
@@ -449,6 +453,7 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     else:
         modNdvi = ndvi
         modNdsi = ndsi
+    del ndsi, ndvi
     # Maximum of three indices
     maxNdx = numpy.absolute(modNdvi)
     maxNdx = numpy.maximum(maxNdx, numpy.absolute(modNdsi))
@@ -469,10 +474,10 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
     wTemperature_prob = 1
     (Tlow, Thigh, Twater) = (None, None, None)
     if hasattr(inputs, 'thermal'):
-        if len(clearSkyWater) > 0:
+        if numpy.count_nonzero(clearSkyWater) > 0:
             Twater = numpy.percentile(bt[clearSkyWater], 82.5)
             wTemperature_prob = (Twater - bt) / 4.0
-        if len(clearLand) > 0:
+        if numpy.count_nonzero(clearLand) > 0:
             Tlow = numpy.percentile(bt[clearLand], 17.5)
             Thigh = numpy.percentile(bt[clearLand], 82.5)
     
@@ -1162,8 +1167,6 @@ def maskAndBuffer(info, inputs, outputs, otherargs):
     """
     snow = inputs.pass1[2].astype(numpy.bool)
     nullmask = inputs.pass1[1].astype(numpy.bool)
-#    refNullmask = inputs.pass1[3].astype(numpy.bool)
-#    thermNullmask = inputs.pass1[5].astype(numpy.bool)
     resetNullmask = nullmask
 
     cloud = inputs.cloud[0].astype(numpy.bool)
