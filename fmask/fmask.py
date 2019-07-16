@@ -592,7 +592,7 @@ def normalizeCirrus(refCirrus, pcp, dem):
     return refCirrusNormed.clip(0)
 
 
-def stdDev10km(img, pixsize):
+def stdDev10km(img, nonNullmask, pixsize):
     """
     Used by the new snow/ice contextual filter (Qiu, 2019). Returns an
     approximation of the focal standard deviation of the given image 
@@ -618,7 +618,8 @@ def stdDev10km(img, pixsize):
         for r in range(rowOff, nrows, winSize):
             for c in range(colOff, ncols, winSize):
                 ndx = (slice(r, r+winSize), slice(c, c+winSize))
-                sd = numpy.std(img[ndx])
+                nonNull = nonNullmask[ndx]
+                sd = numpy.std(img[ndx][nonNull])
                 windowStd[i][ndx] = sd
     
     avgStdDev = windowStd.mean(axis=0)
