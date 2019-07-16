@@ -592,6 +592,39 @@ def normalizeCirrus(refCirrus, pcp, dem):
     return refCirrusNormed.clip(0)
 
 
+def stdDev10km(img, pixsize):
+    """
+    Used by the new snow/ice contextual filter (Qiu, 2019). Returns an
+    approximation of the focal standard deviation of the given image 
+    layer, with a window size of 10km. 
+    
+    Doing this with a full moving window would be Very Slow, due to 
+    the large window size. So, this function simply does two sets of 10km
+    windows, offset from each other by 5km, and averages these. This
+    should, in theory, be a reasonable approximation of the more general 
+    case of a moving window shifting by 1 pixel. 
+    
+    """
+    # The window size in pixels
+    TEN_KM = 10000
+    winSize = int(round(TEN_KM / pixsize))
+    (nrows, ncols) = img.shape
+    
+    # Loop over two different offsets
+    windowStd = numpy.zeros((2, nrows, ncols), dtype=numpy.float32)
+    offsetList = [(0, 0), (winSize//2, winSize//2)]
+    for i in range(len(offsetList)):
+        (rowOff, colOff) = offsetList[i]
+        for r in range(rowOff, nrows, winSize):
+            for c in range(colOff, ncols, winSize):
+                ndx = (slice(r, r+winSize), slice(c, c+winSize))
+                sd = numpy.std(img[ndx])
+                windowStd[i][ndx] = sd
+    
+    avgStdDev = windowStd.mean(axis=0)
+    return avgStdDev
+
+
 def doPotentialShadows(fmaskFilenames, fmaskConfig, NIR_17):
     """
     Make potential shadow layer, as per section 3.1.3 of Zhu&Woodcock 2012. 
