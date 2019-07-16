@@ -551,7 +551,7 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
 
     bufferedCloudmask[nullmask] = 0
 
-    # Output the pcp and water test layers. 
+    # Output the initial cloud mask, and some layers used later 
     outputs.pass1 = numpy.array([bufferedCloudmask, nullmask, snowmask, waterTest])
     
     otherargs.nir_17 = None
@@ -559,11 +559,6 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         otherargs.nir_17 = numpy.percentile(ref[nir][clearLand], 17.5)
     otherargs.Tlow = Tlow
     otherargs.Thigh = Thigh
-    print('Twater', Twater, 'Tlow', Tlow, 'Thigh', Thigh, 'NIR_17', otherargs.nir_17, 
-        'landThreshold', landThreshold)
-    
-    from rsc.utils import procstatus
-    print('Mem usage at end of pass1', round(procstatus.getMemUsage()/1024/1024/1024, 1), 'Gb')
 
 
 def normalizeCirrus(refCirrus, pcp, dem):
@@ -589,7 +584,7 @@ def normalizeCirrus(refCirrus, pcp, dem):
             # Subtract this from all reflectance at this level
             refCirrusNormed[atLevel] = refCirrus[atLevel] - minRefAtLevel
 
-    return refCirrusNormed
+    return refCirrusNormed.clip(0)
 
 
 def doPotentialShadows(fmaskFilenames, fmaskConfig, NIR_17):
