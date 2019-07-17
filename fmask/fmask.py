@@ -144,13 +144,10 @@ def doFmask(fmaskFilenames, fmaskConfig):
         fmaskConfig.demFile, 'tmpdem_', fmaskConfig)
 
     if fmaskConfig.verbose: print("Cloud layer, pass 1")
-    (pass1file, NIR_17, Tlow, Thigh) = doPotentialCloudFirstPass(
+    (pass1file, potentialShadowsFile, Tlow, Thigh) = doPotentialCloudFirstPass(
         fmaskFilenames, fmaskConfig, missingThermal, tmpGSWOfile, tmpDEMfile)
     # Now only one pass to this point
     interimCloudmask = pass1file
-
-    if fmaskConfig.verbose: print("Potential shadows")
-    potentialShadowsFile = doPotentialShadows(fmaskFilenames, fmaskConfig, NIR_17)
     
     if fmaskConfig.verbose: print("Clumping clouds")
     (clumps, numClumps) = clumpClouds(interimCloudmask)
@@ -256,9 +253,11 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
     infiles.gswo = tmpGSWOfile
     infiles.dem = tmpDEMfile
     
-    
-    (fd, outfiles.pass1) = tempfile.mkstemp(prefix='pass1', dir=fmaskConfig.tempDir, 
+    (fd, outfiles.pass1) = tempfile.mkstemp(prefix='tmppass1_', dir=fmaskConfig.tempDir, 
                                 suffix=fmaskConfig.defaultExtension)
+    os.close(fd)
+    (fd, outfiles.potentialshadows) = tempfile.mkstemp(prefix='tmpshadows_', dir=fmaskConfig.tempDir, 
+                                        suffix=fmaskConfig.defaultExtension)
     os.close(fd)
     controls.setReferenceImage(infiles.toaref)
     controls.setResampleMethod('near', imagename='gswo')
@@ -309,7 +308,7 @@ def doPotentialCloudFirstPass(fmaskFilenames, fmaskConfig, missingThermal,
 
     applier.apply(potentialCloudFirstPass, infiles, outfiles, otherargs, controls=controls)
     
-    return (outfiles.pass1, otherargs.nir_17, otherargs.Tlow, otherargs.Thigh)
+    return (outfiles.pass1, outfiles.potentialshadows, otherargs.Tlow, otherargs.Thigh)
 
 
 def potentialCloudFirstPass(info, inputs, outputs, otherargs):
@@ -567,12 +566,28 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
 
     bufferedCloudmask[nullmask] = 0
 
+    # Potential shadows
+    (nir_17, swir1_17) = (None, None)
+    if numpy.count_nonzero(clearLand) > 0:
+        nir_17 = numpy.percentile(ref[nir][clearLand], 17.5)
+        nir_17_dn = nir_17 * fmaskConfig.TOARefScaling
+        swir1_17 = numpy.percentile(ref[swir1][clearLand], 17.5)
+        swir1_17_dn = swir1_17 * fmaskConfig.TOARefScaling
+
+    # Use both NIR and SWIR1 for potential shadows, as per Zhu 2015. 
+    nir_filled = fillminima.fillMinima(inputs.toaref[nir].astype(numpy.int16), 
+        otherargs.refNull, nir_17_dn) / fmaskConfig.TOARefScaling
+    swir1_filled = fillminima.fillMinima(inputs.toaref[swir1].astype(numpy.int16), 
+        otherargs.refNull, swir1_17_dn) / fmaskConfig.TOARefScaling
+    nirDiff = nir_filled - ref[nir]
+    swir1Diff = swir1_filled - ref[swir1]
+    minDiff = numpy.minimum(nirDiff, swir1Diff)
+    potentialShadows = (minDiff > fmaskConfig.Eqn19NIRFillThresh)
+
     # Output the initial cloud mask, and some layers used later 
     outputs.pass1 = numpy.array([bufferedCloudmask, nullmask, snowmask, waterTest])
+    outputs.potentialshadows = numpy.expand_dims(potentialShadows, 0)
     
-    otherargs.nir_17 = None
-    if numpy.count_nonzero(clearLand) > 0:
-        otherargs.nir_17 = numpy.percentile(ref[nir][clearLand], 17.5)
     otherargs.Tlow = Tlow
     otherargs.Thigh = Thigh
 
@@ -635,52 +650,6 @@ def stdDev10km(img, nonNullmask, pixsize):
     
     avgStdDev = windowStd.mean(axis=0)
     return avgStdDev
-
-
-def doPotentialShadows(fmaskFilenames, fmaskConfig, NIR_17):
-    """
-    Make potential shadow layer, as per section 3.1.3 of Zhu&Woodcock 2012. 
-    """
-    (fd, potentialShadowsFile) = tempfile.mkstemp(prefix='shadows', dir=fmaskConfig.tempDir, 
-                                        suffix=fmaskConfig.defaultExtension)
-    os.close(fd)
-
-    # convert from numpy (0 based) to GDAL (1 based) indexing
-    NIR_lyr = fmaskConfig.bands[config.BAND_NIR] + 1
-    
-    # Read in whole of band 4
-    ds = gdal.Open(fmaskFilenames.toaRef)
-    band = ds.GetRasterBand(NIR_lyr)
-    nullval = band.GetNoDataValue()
-    if nullval is None:
-        nullval = 0
-    # Sentinel2 is uint16 which causes problems...
-    scaledNIR = band.ReadAsArray().astype(numpy.int16)
-    NIR_17_dn = NIR_17 * fmaskConfig.TOARefScaling
-    
-    scaledNIR_filled = fillminima.fillMinima(scaledNIR, nullval, NIR_17_dn)
-
-    NIR = scaledNIR.astype(numpy.float) / fmaskConfig.TOARefScaling
-    NIR_filled = scaledNIR_filled.astype(numpy.float) / fmaskConfig.TOARefScaling
-    del scaledNIR, scaledNIR_filled
-    
-    # Equation 19
-    potentialShadows = ((NIR_filled - NIR) > fmaskConfig.Eqn19NIRFillThresh)
-    
-    driver = gdal.GetDriverByName(applier.DEFAULTDRIVERNAME)
-    creationOptions = applier.dfltDriverOptions[applier.DEFAULTDRIVERNAME]
-    outds = driver.Create(potentialShadowsFile, ds.RasterXSize, ds.RasterYSize, 
-                    1, gdal.GDT_Byte, creationOptions)
-    proj = ds.GetProjection()
-    outds.SetProjection(proj)
-    transform = ds.GetGeoTransform()
-    outds.SetGeoTransform(transform)
-    outband = outds.GetRasterBand(1)
-    outband.WriteArray(potentialShadows)
-    outband.SetNoDataValue(0)
-    del outds
-
-    return potentialShadowsFile
 
 
 def clumpClouds(cloudmaskfile):
