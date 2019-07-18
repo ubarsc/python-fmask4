@@ -47,7 +47,6 @@ from __future__ import print_function, division
 
 import sys
 import os
-import subprocess
 import tempfile
 
 import numpy
@@ -220,13 +219,10 @@ def tempSubsetGlobalAux(toaRefFile, globalAuxFile, tmpPrefix, fmaskConfig):
     top = max(uly, ury, lly, lry) + globalinfo.yRes
     bottom = min(uly, ury, lly, lry) - globalinfo.yRes
     
-    # Need to get Sam to help with Windoze-compatible details of finding gdal_translate
-    cmdList = ["gdal_translate", "-q", "-of", "GTiff", "-co", "COMPRESS=DEFLATE", 
-        "-co", "TILED=YES", "-co", "BIGTIFF=IF_SAFER", 
-        "-projwin", str(left), str(top), str(right), str(bottom), 
-        globalAuxFile, tmpfile]
-    proc = subprocess.Popen(cmdList)
-    proc.communicate()
+    creationOptions = ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=IF_SAFER"]
+    translateOptions = gdal.TranslateOptions(format="GTiff", creationOptions=creationOptions,
+        projWin=[left, top, right, bottom])
+    gdal.Translate(tmpfile, globalAuxFile, options=translateOptions)
     return tmpfile
 
 
@@ -420,7 +416,7 @@ def potentialCloudFirstPass(info, inputs, outputs, otherargs):
         scsi10 = sd10 * (1 - ndsi)
         trueSnow = (scsi10 > 0.0009) & snowmask
         pcp[trueSnow] = False
-        del sd1, scsi10, trueSnow
+        del sd10, scsi10, trueSnow
     
     # If Sentinel-2, we can use the Frantz 2018 displacement test
     if (fmaskConfig.sensor == config.FMASK_SENTINEL2) and fmaskConfig.sen2displacementTest:
@@ -645,7 +641,9 @@ def stdDev10km(img, nonNullmask, pixsize):
             for c in range(colOff, ncols, winSize):
                 ndx = (slice(r, r+winSize), slice(c, c+winSize))
                 nonNull = nonNullmask[ndx]
-                sd = numpy.std(img[ndx][nonNull])
+                sd = 0
+                if numpy.count_nonzero(nonNull) > 5:
+                    sd = numpy.std(img[ndx][nonNull])
                 windowStd[i][ndx] = sd
     
     avgStdDev = windowStd.mean(axis=0)
