@@ -1,10 +1,10 @@
-Implementation in Python of the cloud and shadow algorithms known collectively as Fmask, 
-as published in:
+This is an experimental repo for implementing the Fmask4.0 algorithm, as described by
 
-Zhu, Z. and Woodcock, C.E. (2012). Object-based cloud and cloud shadow detection in Landsat imagery Remote Sensing of Environment 118 (2012) 83-94. 
-    
-and
-    
-Zhu, Z., Wang, S. and Woodcock, C.E. (2015). Improvement and expansion of the Fmask algorithm: cloud, cloud shadow, and snow detection for Landsats 4-7, 8, and Sentinel 2 images Remote Sensing of Environment 159 (2015) 269-277.
+Qiu, S., Zhu, Z., & He, B. (2019). Fmask 4.0: Improved cloud and cloud shadow 
+detection in Landsats 4-8 and Sentinel-2 imagery. Remote Sensing of Environment, 231, 111205.
 
-Please visit the main web page at: [pythonfmask.org](http://pythonfmask.org/)
+The changes are in a test branch called fmask4improvements, and are not yet complete or stable. 
+Use with caution. 
+
+For a stable implementation of the earlier Fmask algorithm(s) (Zhu et al, 2012; Zhu et al, 2015),
+please visit [www.pythonfmask.org](http://www.pythonfmask.org/)
